@@ -8,9 +8,7 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-use wasm_prolog::{
-    Prolog, DEFAULT_FUEL, STATUS_NO_MORE, STATUS_OK, STATUS_OUT_OF_FUEL,
-};
+use wasm_prolog::{Prolog, DEFAULT_FUEL, STATUS_NO_MORE, STATUS_OK, STATUS_OUT_OF_FUEL};
 
 fn main() -> ExitCode {
     let mut prolog = match Prolog::new() {

@@ -14,7 +14,10 @@ fn rt(input: &str) -> String {
 fn rt_err(input: &str) -> String {
     let mut prolog = Prolog::new().expect("instantiate prolog.wat");
     let (status, text) = prolog.roundtrip(input).unwrap();
-    assert_eq!(status, STATUS_ERROR, "expected error for {input:?}, got: {text}");
+    assert_eq!(
+        status, STATUS_ERROR,
+        "expected error for {input:?}, got: {text}"
+    );
     text
 }
 
@@ -143,7 +146,10 @@ fn facts_and_clause_order() {
         ["X = bob", "X = carol"]
     );
     assert_eq!(program_solve(FAMILY, "?- parent(X, dave)."), ["X = bob"]);
-    assert_eq!(program_solve(FAMILY, "?- parent(dave, X)."), Vec::<String>::new());
+    assert_eq!(
+        program_solve(FAMILY, "?- parent(dave, X)."),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
@@ -193,7 +199,10 @@ fn multiple_variables_shared_across_goals() {
     ";
     assert_eq!(
         program_solve(program, "?- likes(X, Drink), likes(Y, Drink), X = mary."),
-        ["X = mary,\nDrink = wine,\nY = mary", "X = mary,\nDrink = wine,\nY = john"]
+        [
+            "X = mary,\nDrink = wine,\nY = mary",
+            "X = mary,\nDrink = wine,\nY = john"
+        ]
     );
 }
 
@@ -203,8 +212,14 @@ fn pull_one_solution_at_a_time() {
     prolog.consult(MEMBER).unwrap();
     let (status, _) = prolog.query_begin("?- member(X, [a,b]).").unwrap();
     assert_eq!(status, STATUS_OK);
-    assert_eq!(prolog.query_next(DEFAULT_FUEL).unwrap(), (STATUS_OK, "X = a".into()));
-    assert_eq!(prolog.query_next(DEFAULT_FUEL).unwrap(), (STATUS_OK, "X = b".into()));
+    assert_eq!(
+        prolog.query_next(DEFAULT_FUEL).unwrap(),
+        (STATUS_OK, "X = a".into())
+    );
+    assert_eq!(
+        prolog.query_next(DEFAULT_FUEL).unwrap(),
+        (STATUS_OK, "X = b".into())
+    );
     assert_eq!(prolog.query_next(DEFAULT_FUEL).unwrap().0, STATUS_NO_MORE);
     // asking again after exhaustion is fine
     assert_eq!(prolog.query_next(DEFAULT_FUEL).unwrap().0, STATUS_NO_MORE);
