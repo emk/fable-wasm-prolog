@@ -78,6 +78,15 @@ impl Prolog {
         self.call_text("roundtrip", input)
     }
 
+    /// Parse a Prolog program and add its clauses to the database.
+    pub fn consult(&mut self, program: &str) -> Result<()> {
+        let (status, text) = self.call_text("consult", program)?;
+        if status == STATUS_ERROR {
+            return Err(Error::msg(text));
+        }
+        Ok(())
+    }
+
     /// Parse a query (the "?-" is optional) and set up the search.
     pub fn query_begin(&mut self, query: &str) -> Result<(i32, String)> {
         self.call_text("query_begin", query)

@@ -76,6 +76,14 @@
                        (field $s-val (ref $term))
                        (field $s-next (ref null $subst))))
 
+  ;; A clause in the database, `Head :- Body` (a fact has a null
+  ;; body). Its variables are numbered 0..nvars-1; every use gets
+  ;; a fresh renaming, so we remember how many there are.
+  (type $clause (struct (field $c-head (ref $term))
+                        (field $c-body (ref null $tlist))
+                        (field $c-nvars i32)
+                        (field $c-next (mut (ref null $clause)))))
+
   ;; One alternative in the search: "prove these goals under this
   ;; substitution". The solver's frontier is a stack of frames --
   ;; a miniKanren stream with the closures replaced by plain data.
@@ -100,6 +108,7 @@
   (data (i32.const 41060) "output too long")
   (data (i32.const 41100) "unknown predicate ")
   (data (i32.const 41120) "cannot call an unbound variable")
+  (data (i32.const 41160) "clause head must be an atom or compound")
 
   ;; ----------------------------------------------------------
   ;; Output buffer
@@ -727,6 +736,64 @@
       (call $out-byte (i32.const 93)))) ;; ]
 
   ;; ----------------------------------------------------------
+  ;; The clause database
+  ;; ----------------------------------------------------------
+  ;;
+  ;; A linked list of clauses in the order they were consulted
+  ;; (Prolog tries clauses first-to-last, so order matters).
+  (global $db (mut (ref null $clause)) (ref.null $clause))
+  (global $db-tail (mut (ref null $clause)) (ref.null $clause))
+
+  (func $db-append (param $h (ref $term)) (param $b (ref null $tlist)) (param $nv i32)
+    (local $c (ref null $clause))
+    (local.set $c (struct.new $clause (local.get $h) (local.get $b)
+                              (local.get $nv) (ref.null $clause)))
+    (if (ref.is_null (global.get $db-tail))
+      (then (global.set $db (local.get $c)))
+      (else (struct.set $clause $c-next (global.get $db-tail) (local.get $c))))
+    (global.set $db-tail (local.get $c)))
+
+  ;; Copy a clause term, shifting every variable id by $off.
+  ;; This is "renaming apart": each use of a clause must get
+  ;; fresh variables so different uses cannot interfere.
+  (func $rename (param $t (ref $term)) (param $off i32) (result (ref $term))
+    (local $a (ref null $app)) (local $args (ref null $term-array))
+    (local $copy (ref null $term-array)) (local $n i32) (local $i i32)
+    (if (ref.test (ref $var) (local.get $t))
+      (then (return (struct.new $var
+        (i32.add (struct.get $var $id (ref.cast (ref $var) (local.get $t)))
+                 (local.get $off))))))
+    (local.set $a (ref.cast (ref $app) (local.get $t)))
+    (local.set $args (struct.get $app $args (local.get $a)))
+    (local.set $n (array.len (local.get $args)))
+    ;; atoms are ground; share them instead of copying
+    (if (i32.eqz (local.get $n)) (then (return (local.get $t))))
+    (local.set $copy (array.new $term-array
+      (call $rename (array.get $term-array (local.get $args) (i32.const 0)) (local.get $off))
+      (local.get $n)))
+    (local.set $i (i32.const 1))
+    (block $done
+      (loop $lp
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (array.set $term-array (local.get $copy) (local.get $i)
+          (call $rename (array.get $term-array (local.get $args) (local.get $i))
+                        (local.get $off)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (struct.new $app (struct.get $app $sym (local.get $a))
+                     (ref.as_non_null (local.get $copy))))
+
+  ;; Rename a clause body and append the goals we still owe:
+  ;; renamed-body ++ rest.
+  (func $rename-body (param $b (ref null $tlist)) (param $off i32)
+                     (param $rest (ref null $tlist)) (result (ref null $tlist))
+    (if (ref.is_null (local.get $b)) (then (return (local.get $rest))))
+    (struct.new $tlist
+      (call $rename (struct.get $tlist $tl-head (local.get $b)) (local.get $off))
+      (call $rename-body (struct.get $tlist $tl-tail (local.get $b))
+                         (local.get $off) (local.get $rest))))
+
+  ;; ----------------------------------------------------------
   ;; The solver
   ;; ----------------------------------------------------------
   ;;
@@ -768,6 +835,40 @@
     (call $out-byte (i32.const 32))
     (call $print-term (struct.new $var (struct.get $vnames $vn-id (local.get $v)))
                       (local.get $s)))
+
+  ;; Push one alternative per database clause whose head might
+  ;; match $goal. Walks the clause list recursively and pushes on
+  ;; the way back out, so the FIRST clause lands on TOP of the
+  ;; frontier stack and is tried first, giving Prolog's usual
+  ;; clause order. Returns 1 if any clause had the goal's functor
+  ;; and arity (else the predicate is unknown).
+  (func $try-clauses (param $c (ref null $clause)) (param $goal (ref $app))
+                     (param $rest (ref null $tlist)) (param $s (ref null $subst))
+                     (result i32)
+    (local $known i32) (local $off i32) (local $s2 (ref null $subst))
+    (local $ha (ref null $app))
+    (if (ref.is_null (local.get $c)) (then (return (i32.const 0))))
+    (local.set $known (call $try-clauses (struct.get $clause $c-next (local.get $c))
+                            (local.get $goal) (local.get $rest) (local.get $s)))
+    (local.set $ha (ref.cast (ref $app) (struct.get $clause $c-head (local.get $c))))
+    (if (i32.or (i32.ne (struct.get $app $sym (local.get $ha))
+                        (struct.get $app $sym (local.get $goal)))
+                (i32.ne (array.len (struct.get $app $args (local.get $ha)))
+                        (array.len (struct.get $app $args (local.get $goal)))))
+      (then (return (local.get $known))))
+    ;; carve out a fresh block of variable ids for this use
+    (local.set $off (global.get $var-counter))
+    (global.set $var-counter
+      (i32.add (global.get $var-counter) (struct.get $clause $c-nvars (local.get $c))))
+    (local.set $s2 (call $unify (local.get $goal)
+      (call $rename (struct.get $clause $c-head (local.get $c)) (local.get $off))
+      (local.get $s)))
+    (if (i32.eqz (ref.eq (local.get $s2) (global.get $no-unify)))
+      (then (call $push-frame
+        (call $rename-body (struct.get $clause $c-body (local.get $c))
+                           (local.get $off) (local.get $rest))
+        (local.get $s2))))
+    (i32.const 1))
 
   (func $error-unknown (param $sym i32) (param $arity i32)
     (call $out-reset)
@@ -855,11 +956,50 @@
           (if (i32.eqz (ref.eq (local.get $s2) (global.get $no-unify)))
             (then (call $push-frame (local.get $goals) (local.get $s2))))
           (br $step)))
-      ;; user-defined predicates arrive with the clause database
-      (call $error-unknown (struct.get $app $sym (local.get $a))
-                           (array.len (local.get $args)))
-      (return (i32.const 3)))
+      ;; a user-defined predicate: one alternative per matching
+      ;; database clause
+      (if (i32.eqz (call $try-clauses (global.get $db) (ref.as_non_null (local.get $a))
+                         (local.get $goals) (local.get $s)))
+        (then
+          (call $error-unknown (struct.get $app $sym (local.get $a))
+                               (array.len (local.get $args)))
+          (return (i32.const 3))))
+      (br $step))
     (unreachable))
+
+  ;; Parse and assert a whole program: clause* up to end of input.
+  (func (export "consult") (param $len i32) (result i32)
+    (local $head (ref null $term)) (local $body (ref null $tlist))
+    (global.set $pos (i32.const 0))
+    (global.set $end (local.get $len))
+    (call $advance)
+    (block $done
+      (loop $clauses
+        (br_if $done (i32.eqz (global.get $tok))) ;; EOF
+        (call $reset-vars)
+        (local.set $head (call $parse-term))
+        (if (ref.is_null (local.get $head)) (then (return (i32.const 3))))
+        (if (i32.eqz (ref.test (ref $app) (local.get $head)))
+          (then
+            (call $error-at (i32.const 41160) (i32.const 39) (global.get $tok-start))
+            (return (i32.const 3))))
+        (local.set $body (ref.null $tlist))
+        (if (i32.eq (global.get $tok) (i32.const 10)) ;; :-
+          (then
+            (call $advance)
+            (local.set $body (call $parse-goals))
+            (if (ref.is_null (local.get $body)) (then (return (i32.const 3))))))
+        (if (i32.ne (global.get $tok) (i32.const 9)) ;; .
+          (then
+            (call $error-at (i32.const 41048) (i32.const 12) (global.get $tok-start))
+            (return (i32.const 3))))
+        (call $advance)
+        (call $db-append (ref.as_non_null (local.get $head)) (local.get $body)
+                         (global.get $nvars))
+        (br $clauses)))
+    (call $out-reset)
+    (call $out-finish)
+    (i32.const 0))
 
   ;; Test hook: parse one goal ending in '.', print it back.
   (func (export "roundtrip") (param $len i32) (result i32)
