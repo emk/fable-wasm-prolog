@@ -60,6 +60,54 @@ fn comments_and_whitespace() {
     assert_eq!(rt("% a comment\n  foo(  X ). % trailing"), "foo(_G0)");
 }
 
+/// Run a query and collect all solutions (up to 100).
+fn solve(query: &str) -> Vec<String> {
+    let mut prolog = Prolog::new().expect("instantiate prolog.wat");
+    prolog.solutions(query, 100).unwrap()
+}
+
+fn solve_err(query: &str) -> String {
+    let mut prolog = Prolog::new().expect("instantiate prolog.wat");
+    prolog.solutions(query, 100).unwrap_err().to_string()
+}
+
+#[test]
+fn query_true_and_unification() {
+    assert_eq!(solve("?- true."), ["true"]);
+    assert_eq!(solve("?- foo = foo."), ["true"]);
+    assert_eq!(solve("?- foo = bar."), Vec::<String>::new());
+    assert_eq!(solve("?- X = foo."), ["X = foo"]);
+    assert_eq!(solve("X = foo."), ["X = foo"]); // ?- is optional
+}
+
+#[test]
+fn query_conjunction_chains_bindings() {
+    assert_eq!(solve("?- X = foo(Y), Y = bar."), ["X = foo(bar),\nY = bar"]);
+    assert_eq!(solve("?- X = a, X = b."), Vec::<String>::new());
+    assert_eq!(solve("?- X = Y, Y = z."), ["X = z,\nY = z"]);
+}
+
+#[test]
+fn query_destructures_lists() {
+    assert_eq!(solve("?- [H|T] = [a,b,c]."), ["H = a,\nT = [b,c]"]);
+    assert_eq!(solve("?- [a|T] = [X,b]."), ["T = [b],\nX = a"]);
+}
+
+#[test]
+fn occurs_check_rejects_cyclic_terms() {
+    assert_eq!(solve("?- X = f(X)."), Vec::<String>::new());
+    assert_eq!(solve("?- X = f(Y), Y = g(X)."), Vec::<String>::new());
+}
+
+#[test]
+fn query_errors() {
+    assert!(solve_err("?- undefined_thing(x).").contains("unknown predicate undefined_thing/1"));
+    assert!(solve_err("?- foo.").contains("unknown predicate foo/0"));
+    assert!(solve_err("?- X = a, X.").contains("unknown predicate a/0"));
+    assert!(solve_err("?- X.").contains("cannot call an unbound variable"));
+    assert!(solve_err("?- f(.").contains("unexpected token"));
+}
+
 #[test]
 fn parse_errors() {
     assert!(rt_err("foo").contains("expected '.'"));

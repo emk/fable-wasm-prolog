@@ -13,7 +13,13 @@ const OUT_BUF: usize = 32768;
 
 /// Status codes shared with prolog.wat.
 pub const STATUS_OK: i32 = 0;
+pub const STATUS_NO_MORE: i32 = 1;
+pub const STATUS_OUT_OF_FUEL: i32 = 2;
 pub const STATUS_ERROR: i32 = 3;
+
+/// Frames the solver may pop per query_next call before it
+/// hands control back (so hosts stay responsive).
+pub const DEFAULT_FUEL: i32 = 1_000_000;
 
 pub struct Prolog {
     store: Store<()>,
@@ -70,5 +76,41 @@ impl Prolog {
     /// Test hook: parse one goal and print it back.
     pub fn roundtrip(&mut self, input: &str) -> Result<(i32, String)> {
         self.call_text("roundtrip", input)
+    }
+
+    /// Parse a query (the "?-" is optional) and set up the search.
+    pub fn query_begin(&mut self, query: &str) -> Result<(i32, String)> {
+        self.call_text("query_begin", query)
+    }
+
+    /// Search until the next solution, popping at most `fuel`
+    /// alternatives before returning STATUS_OUT_OF_FUEL.
+    pub fn query_next(&mut self, fuel: i32) -> Result<(i32, String)> {
+        let f = self
+            .instance
+            .get_typed_func::<i32, i32>(&mut self.store, "query_next")?;
+        let status = f.call(&mut self.store, fuel)?;
+        Ok((status, self.read_output()?))
+    }
+
+    /// Convenience: run a query and collect up to `max` solutions.
+    /// Interpreter-level failures (parse errors, unknown
+    /// predicates) come back as Err.
+    pub fn solutions(&mut self, query: &str, max: usize) -> Result<Vec<String>> {
+        let (status, text) = self.query_begin(query)?;
+        if status == STATUS_ERROR {
+            return Err(Error::msg(text));
+        }
+        let mut found = Vec::new();
+        while found.len() < max {
+            let (status, text) = self.query_next(DEFAULT_FUEL)?;
+            match status {
+                STATUS_OK => found.push(text),
+                STATUS_NO_MORE => break,
+                STATUS_OUT_OF_FUEL => continue,
+                _ => return Err(Error::msg(text)),
+            }
+        }
+        Ok(found)
     }
 }

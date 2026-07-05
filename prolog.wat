@@ -76,6 +76,14 @@
                        (field $s-val (ref $term))
                        (field $s-next (ref null $subst))))
 
+  ;; One alternative in the search: "prove these goals under this
+  ;; substitution". The solver's frontier is a stack of frames --
+  ;; a miniKanren stream with the closures replaced by plain data.
+  ;; Popping a frame after a dead end IS backtracking.
+  (type $frame (struct (field $f-goals (ref null $tlist))
+                       (field $f-subst (ref null $subst))
+                       (field $f-next (ref null $frame))))
+
   ;; ----------------------------------------------------------
   ;; Static strings (see memory map above)
   ;; ----------------------------------------------------------
@@ -90,6 +98,8 @@
   (data (i32.const 41036) "expected ']'")
   (data (i32.const 41048) "expected '.'")
   (data (i32.const 41060) "output too long")
+  (data (i32.const 41100) "unknown predicate ")
+  (data (i32.const 41120) "cannot call an unbound variable")
 
   ;; ----------------------------------------------------------
   ;; Output buffer
@@ -489,6 +499,19 @@
                                          (ref.as_non_null (local.get $r)))))))
     (local.get $l))
 
+  ;; goal { ',' goal } -- at least one, so null always = error.
+  (func $parse-goals (result (ref null $tlist))
+    (local $h (ref null $term)) (local $rest (ref null $tlist))
+    (local.set $h (call $parse-goal))
+    (if (ref.is_null (local.get $h)) (then (return (ref.null $tlist))))
+    (if (i32.eq (global.get $tok) (i32.const 5)) ;; ,
+      (then
+        (call $advance)
+        (local.set $rest (call $parse-goals))
+        (if (ref.is_null (local.get $rest)) (then (return (ref.null $tlist))))
+        (return (struct.new $tlist (ref.as_non_null (local.get $h)) (local.get $rest)))))
+    (struct.new $tlist (ref.as_non_null (local.get $h)) (ref.null $tlist)))
+
   (func $tlist-len (param $l (ref null $tlist)) (result i32)
     (local $n i32)
     (block $done
@@ -542,6 +565,92 @@
           (br $sl)))
       (br $again))
     (unreachable))
+
+  ;; ----------------------------------------------------------
+  ;; Unification
+  ;; ----------------------------------------------------------
+  ;;
+  ;; $unify returns the (possibly extended) substitution, or the
+  ;; unique sentinel $no-unify on failure. (Failure cannot be
+  ;; null: null is the perfectly good *empty* substitution.)
+  (global $no-unify (ref $subst)
+    (struct.new $subst (i32.const -1)
+                       (struct.new $var (i32.const -1))
+                       (ref.null $subst)))
+
+  ;; Does variable $id occur in $t? Real Prologs skip this check
+  ;; for speed and let X = f(X) build a cyclic term; we do it the
+  ;; miniKanren way so every term stays finite and printable.
+  (func $occurs (param $id i32) (param $t (ref $term)) (param $s (ref null $subst)) (result i32)
+    (local $args (ref null $term-array)) (local $n i32) (local $i i32)
+    (local.set $t (call $walk (local.get $t) (local.get $s)))
+    (if (ref.test (ref $var) (local.get $t))
+      (then (return (i32.eq (struct.get $var $id (ref.cast (ref $var) (local.get $t)))
+                            (local.get $id)))))
+    (local.set $args (struct.get $app $args (ref.cast (ref $app) (local.get $t))))
+    (local.set $n (array.len (local.get $args)))
+    (block $done
+      (loop $lp
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (if (call $occurs (local.get $id)
+                          (array.get $term-array (local.get $args) (local.get $i))
+                          (local.get $s))
+          (then (return (i32.const 1))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (i32.const 0))
+
+  (func $unify (param $t1 (ref $term)) (param $t2 (ref $term)) (param $s (ref null $subst))
+               (result (ref null $subst))
+    (local $a1 (ref null $app)) (local $a2 (ref null $app))
+    (local $n i32) (local $i i32)
+    (local.set $t1 (call $walk (local.get $t1) (local.get $s)))
+    (local.set $t2 (call $walk (local.get $t2) (local.get $s)))
+    ;; the same unbound variable on both sides: nothing to do
+    (if (i32.and (ref.test (ref $var) (local.get $t1))
+                 (ref.test (ref $var) (local.get $t2)))
+      (then
+        (if (i32.eq (struct.get $var $id (ref.cast (ref $var) (local.get $t1)))
+                    (struct.get $var $id (ref.cast (ref $var) (local.get $t2))))
+          (then (return (local.get $s))))))
+    ;; unbound variable on either side: bind it
+    (if (ref.test (ref $var) (local.get $t1))
+      (then
+        (if (call $occurs (struct.get $var $id (ref.cast (ref $var) (local.get $t1)))
+                          (local.get $t2) (local.get $s))
+          (then (return (global.get $no-unify))))
+        (return (struct.new $subst
+          (struct.get $var $id (ref.cast (ref $var) (local.get $t1)))
+          (local.get $t2) (local.get $s)))))
+    (if (ref.test (ref $var) (local.get $t2))
+      (then
+        (if (call $occurs (struct.get $var $id (ref.cast (ref $var) (local.get $t2)))
+                          (local.get $t1) (local.get $s))
+          (then (return (global.get $no-unify))))
+        (return (struct.new $subst
+          (struct.get $var $id (ref.cast (ref $var) (local.get $t2)))
+          (local.get $t1) (local.get $s)))))
+    ;; two applications: same functor, same arity, args unify
+    (local.set $a1 (ref.cast (ref $app) (local.get $t1)))
+    (local.set $a2 (ref.cast (ref $app) (local.get $t2)))
+    (if (i32.ne (struct.get $app $sym (local.get $a1))
+                (struct.get $app $sym (local.get $a2)))
+      (then (return (global.get $no-unify))))
+    (local.set $n (array.len (struct.get $app $args (local.get $a1))))
+    (if (i32.ne (local.get $n) (array.len (struct.get $app $args (local.get $a2))))
+      (then (return (global.get $no-unify))))
+    (block $done
+      (loop $lp
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $s (call $unify
+          (array.get $term-array (struct.get $app $args (local.get $a1)) (local.get $i))
+          (array.get $term-array (struct.get $app $args (local.get $a2)) (local.get $i))
+          (local.get $s)))
+        (if (ref.eq (local.get $s) (global.get $no-unify))
+          (then (return (global.get $no-unify))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $lp)))
+    (local.get $s))
 
   ;; ----------------------------------------------------------
   ;; Printer
@@ -618,11 +727,139 @@
       (call $out-byte (i32.const 93)))) ;; ]
 
   ;; ----------------------------------------------------------
+  ;; The solver
+  ;; ----------------------------------------------------------
+  ;;
+  ;; One query is active at a time; its search state lives here.
+  ;; Because the frontier is plain data, the host can pull one
+  ;; solution at a time -- there is nothing to suspend or resume.
+  (global $frontier (mut (ref null $frame)) (ref.null $frame))
+  ;; The active query's variable names, for printing answers.
+  (global $query-vars (mut (ref null $vnames)) (ref.null $vnames))
+  ;; Fresh variable ids for renaming clauses apart, continuing
+  ;; after the ids the query itself used.
+  (global $var-counter (mut i32) (i32.const 0))
+
+  (func $push-frame (param $goals (ref null $tlist)) (param $s (ref null $subst))
+    (global.set $frontier
+      (struct.new $frame (local.get $goals) (local.get $s) (global.get $frontier))))
+
+  ;; Print one solution: "X = ...,\n..." for each named query
+  ;; variable, or "true" if the query named none.
+  (func $print-solution (param $s (ref null $subst))
+    (call $out-reset)
+    (if (ref.is_null (global.get $query-vars))
+      (then (call $out-mem (i32.const 40964) (i32.const 4))) ;; "true"
+      (else (call $print-bindings (ref.as_non_null (global.get $query-vars)) (local.get $s))))
+    (call $out-finish))
+
+  ;; $vnames lists names newest-first; recurse so they print in
+  ;; order of first appearance.
+  (func $print-bindings (param $v (ref $vnames)) (param $s (ref null $subst))
+    (if (i32.eqz (ref.is_null (struct.get $vnames $vn-next (local.get $v))))
+      (then
+        (call $print-bindings (ref.as_non_null (struct.get $vnames $vn-next (local.get $v)))
+                              (local.get $s))
+        (call $out-byte (i32.const 44))    ;; ,
+        (call $out-byte (i32.const 10))))  ;; \n
+    (call $out-gcstr (struct.get $vnames $vn-name (local.get $v)))
+    (call $out-byte (i32.const 32))
+    (call $out-byte (i32.const 61)) ;; =
+    (call $out-byte (i32.const 32))
+    (call $print-term (struct.new $var (struct.get $vnames $vn-id (local.get $v)))
+                      (local.get $s)))
+
+  (func $error-unknown (param $sym i32) (param $arity i32)
+    (call $out-reset)
+    (call $out-mem (i32.const 41100) (i32.const 18)) ;; "unknown predicate "
+    (call $out-gcstr (call $sym-name (local.get $sym)))
+    (call $out-byte (i32.const 47)) ;; /
+    (call $out-int (local.get $arity))
+    (call $out-finish))
+
+  ;; ----------------------------------------------------------
   ;; Exports
   ;; ----------------------------------------------------------
-  ;; Statuses: 0 = ok (text in OUT_BUF), 3 = error (message in
-  ;; OUT_BUF). (1 = no more solutions and 2 = out of fuel arrive
-  ;; with the solver.)
+  ;; Statuses: 0 = solution/ok (text in OUT_BUF), 1 = no (more)
+  ;; solutions, 2 = out of fuel (call query_next again),
+  ;; 3 = error (message in OUT_BUF).
+
+  ;; Parse a query ("?-" optional) and set up the search.
+  (func (export "query_begin") (param $len i32) (result i32)
+    (local $goals (ref null $tlist))
+    (global.set $pos (i32.const 0))
+    (global.set $end (local.get $len))
+    (call $reset-vars)
+    (global.set $frontier (ref.null $frame))
+    (global.set $query-vars (ref.null $vnames))
+    (call $advance)
+    (if (i32.eq (global.get $tok) (i32.const 11)) ;; ?-
+      (then (call $advance)))
+    (local.set $goals (call $parse-goals))
+    (if (ref.is_null (local.get $goals)) (then (return (i32.const 3))))
+    (if (i32.ne (global.get $tok) (i32.const 9)) ;; .
+      (then
+        (call $error-at (i32.const 41048) (i32.const 12) (global.get $tok-start))
+        (return (i32.const 3))))
+    (global.set $query-vars (global.get $var-names))
+    (global.set $var-counter (global.get $nvars))
+    (call $push-frame (local.get $goals) (ref.null $subst))
+    (i32.const 0))
+
+  ;; Run the search until the next solution (or the end, or an
+  ;; error, or $fuel exhausted frames -- so a slow query cannot
+  ;; freeze the host; just call again to keep searching).
+  (func (export "query_next") (param $fuel i32) (result i32)
+    (local $goals (ref null $tlist)) (local $s (ref null $subst))
+    (local $g (ref null $term)) (local $a (ref null $app))
+    (local $args (ref null $term-array)) (local $s2 (ref null $subst))
+    (loop $step
+      (if (ref.is_null (global.get $frontier))
+        (then (return (i32.const 1)))) ;; search space exhausted
+      (if (i32.eqz (local.get $fuel))
+        (then (return (i32.const 2)))) ;; out of fuel
+      (local.set $fuel (i32.sub (local.get $fuel) (i32.const 1)))
+      ;; pop the top alternative -- on a dead end, this is
+      ;; exactly the backtracking step
+      (local.set $goals (struct.get $frame $f-goals (global.get $frontier)))
+      (local.set $s (struct.get $frame $f-subst (global.get $frontier)))
+      (global.set $frontier (struct.get $frame $f-next (global.get $frontier)))
+      ;; nothing left to prove: a solution
+      (if (ref.is_null (local.get $goals))
+        (then
+          (call $print-solution (local.get $s))
+          (return (i32.const 0))))
+      (local.set $g (call $walk (struct.get $tlist $tl-head (local.get $goals))
+                          (local.get $s)))
+      (local.set $goals (struct.get $tlist $tl-tail (local.get $goals)))
+      (if (ref.test (ref $var) (local.get $g))
+        (then
+          (call $error (i32.const 41120) (i32.const 31))
+          (return (i32.const 3))))
+      (local.set $a (ref.cast (ref $app) (local.get $g)))
+      (local.set $args (struct.get $app $args (local.get $a)))
+      ;; true/0 succeeds without binding anything
+      (if (i32.and (i32.eq (struct.get $app $sym (local.get $a)) (global.get $sym-true))
+                   (i32.eqz (array.len (local.get $args))))
+        (then
+          (call $push-frame (local.get $goals) (local.get $s))
+          (br $step)))
+      ;; =/2: unify, continue only if that succeeded
+      (if (i32.and (i32.eq (struct.get $app $sym (local.get $a)) (global.get $sym-eq))
+                   (i32.eq (array.len (local.get $args)) (i32.const 2)))
+        (then
+          (local.set $s2 (call $unify
+            (array.get $term-array (local.get $args) (i32.const 0))
+            (array.get $term-array (local.get $args) (i32.const 1))
+            (local.get $s)))
+          (if (i32.eqz (ref.eq (local.get $s2) (global.get $no-unify)))
+            (then (call $push-frame (local.get $goals) (local.get $s2))))
+          (br $step)))
+      ;; user-defined predicates arrive with the clause database
+      (call $error-unknown (struct.get $app $sym (local.get $a))
+                           (array.len (local.get $args)))
+      (return (i32.const 3)))
+    (unreachable))
 
   ;; Test hook: parse one goal ending in '.', print it back.
   (func (export "roundtrip") (param $len i32) (result i32)
