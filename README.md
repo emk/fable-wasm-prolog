@@ -1,6 +1,8 @@
 # EXPERIMENT (Claude Fable 5): A tiny Prolog interpreter in WebAssembly
 
-> **Human note:** This is an experiment with an autonomous Claude Fable run, to see what it can one-shot, and how good the code quality is. Here are the [original design notes that I wrote](./DESIGN_NOTES.md) and [Fable's plan](./PLAN.md), which includes my design feedback. The total cost was apparently **$16.75**, and the core Prolog implementation is 1,026 lines of WASM WAT.
+> **Human note:** [Try it here!](https://docs.randomhacks.net/fable-wasm-prolog/)
+>
+> This is an experiment with an autonomous Claude Fable run, to see what it can one-shot, and how good the code quality is. Here are the [original design notes that I wrote](./DESIGN_NOTES.md) and [Fable's plan](./PLAN.md), which includes my design feedback. The total cost was apparently **$16.75**, and the core Prolog implementation is 1,026 lines of WASM WAT.
 >
 > For comparison purposes, see my [ongoing handwritten toy WASM Lisp project](https://github.com/emk/toy-wasm-lisp). That is an _enormously_ self-indulgent hobby project designed to maximize learning and interesting yak-shaving opportunities, so it's hard to make a meaningful direct comparison.
 >
