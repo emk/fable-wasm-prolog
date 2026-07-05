@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tiny WASM Prolog</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1a1a1a; --bg: #fdfdfd; --border: #ccc; --accent: #7b3ff2;
+    --panel: #f4f4f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8e8; --bg: #16161a; --border: #444; --panel: #222228; }
+  }
+  body {
+    margin: 2rem auto; max-width: 46rem; padding: 0 1rem;
+    font: 16px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg);
+  }
+  h1 { font-size: 1.3rem; }
+  h1 span { color: var(--accent); }
+  p.blurb { font-size: .9rem; opacity: .8; }
+  textarea, #query, #log {
+    width: 100%; box-sizing: border-box; font: 14px/1.45 ui-monospace, monospace;
+    color: var(--fg); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px; padding: .6rem;
+  }
+  textarea { height: 16rem; resize: vertical; }
+  #query { margin-top: 1rem; }
+  #log { margin-top: 1rem; min-height: 8rem; max-height: 24rem; overflow-y: auto;
+         white-space: pre-wrap; }
+  .row { display: flex; gap: .5rem; margin-top: .5rem; align-items: baseline; }
+  button {
+    font: inherit; padding: .3rem 1rem; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--fg);
+    cursor: pointer;
+  }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { border-color: var(--accent); }
+  label { font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>Tiny <span>WASM</span> Prolog</h1>
+<p class="blurb">
+  A miniature Prolog interpreter written entirely in WebAssembly (GC extensions),
+  running right here in your browser. Edit the program, type a query, and pull
+  answers one at a time — each “;” pops the next alternative off the
+  interpreter’s backtracking stack.
+</p>
+
+<label for="program">Program (consulted fresh on every run)</label>
+<textarea id="program" spellcheck="false">
+% The classic list predicates.
+append([], Ys, Ys).
+append([X|Xs], Ys, [X|Zs]) :- append(Xs, Ys, Zs).
+
+member(X, [X|_]).
+member(X, [_|T]) :- member(X, T).
+
+reverse([], []).
+reverse([H|T], R) :- reverse(T, RT), append(RT, [H], R).
+
+% A little family tree.
+parent(alice, bob).
+parent(alice, carol).
+parent(bob, dave).
+parent(carol, eve).
+ancestor(X, Y) :- parent(X, Y).
+ancestor(X, Z) :- parent(X, Y), ancestor(Y, Z).
+</textarea>
+
+<input id="query" value="?- append(Xs, Ys, [a,b,c])." spellcheck="false">
+<div class="row">
+  <button id="run" class="primary" disabled>Run query</button>
+  <button id="more" disabled>Next answer&nbsp;;</button>
+  <button id="stop" disabled>Stop</button>
+</div>
+
+<div id="log">loading prolog.wasm…</div>
+
+<script type="module">
+const IN_BUF = 0, IN_CAP = 32768, OUT_BUF = 32768;
+const OK = 0, NO_MORE = 1, OUT_OF_FUEL = 2, ERROR = 3;
+const FUEL = 500000;
+
+const $ = id => document.getElementById(id);
+const log = $("log");
+let inst = null;      // fresh per run: the program textarea is the database
+let searching = null; // timeout id while auto-continuing on OUT_OF_FUEL
+
+const module = await WebAssembly.compileStreaming(fetch("prolog.wasm"))
+  .catch(e => { log.textContent =
+    "failed to load prolog.wasm — did you start this page with `just serve`?\n" + e; });
+if (module) { log.textContent = ""; $("run").disabled = false; }
+
+function readOut() {
+  return new TextDecoder().decode(
+    new Uint8Array(inst.exports.memory.buffer, OUT_BUF, inst.exports.out_len.value));
+}
+
+// consult/query_begin take (length of input text placed at IN_BUF).
+function callText(name, text) {
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.length > IN_CAP) return [ERROR, "input too long"];
+  new Uint8Array(inst.exports.memory.buffer).set(bytes, IN_BUF);
+  return [inst.exports[name](bytes.length), readOut()];
+}
+
+// query_next takes a fuel budget instead.
+function queryNext() {
+  return [inst.exports.query_next(FUEL), readOut()];
+}
+
+const print = text => { log.textContent += text; log.scrollTop = log.scrollHeight; };
+const setButtons = (more, stop) => {
+  $("more").disabled = !more; $("stop").disabled = !stop;
+  $("run").disabled = more || stop;
+};
+
+function finish(text) {
+  print(text);
+  clearTimeout(searching); searching = null;
+  setButtons(false, false);
+}
+
+function step() {
+  const [status, out] = queryNext();
+  switch (status) {
+    case OK:        print(out.replaceAll(",\n", ",\n   ") + " "); setButtons(true, true); break;
+    case NO_MORE:   finish("false.\n\n"); break;
+    case ERROR:     finish("error: " + out + "\n\n"); break;
+    case OUT_OF_FUEL: // yield to the browser, then keep searching
+      setButtons(false, true);
+      searching = setTimeout(step, 0);
+      break;
+  }
+}
+
+$("run").onclick = () => {
+  inst = new WebAssembly.Instance(module);
+  const query = $("query").value.trim();
+  print("?- " + query.replace(/^\?-\s*/, "") + "\n");
+  let [status, out] = callText("consult", $("program").value);
+  if (status === ERROR) { finish("error in program: " + out + "\n\n"); return; }
+  [status, out] = callText("query_begin", query);
+  if (status === ERROR) { finish("error: " + out + "\n\n"); return; }
+  step();
+};
+$("more").onclick = () => { print(";\n   "); setButtons(false, true); step(); };
+$("stop").onclick = () => finish(".\n\n");
+</script>
+</body>
+</html>
