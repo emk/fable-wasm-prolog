@@ -1,4 +1,32 @@
-# A tiny Prolog interpreter in WebAssembly
+# EXPERIMENT (Claude Fable 5): A tiny Prolog interpreter in WebAssembly
+
+> **Human note:** This is an experiment with an autonomous Claude Fable run, to see what it can one-shot, and how good the code quality is. Here are the [original design notes that I wrote](./DESIGN_NOTES.md) and [Fable's plan](./PLAN.md), which includes my design feedback. The total cost was apparently **$16.75**, and the core Prolog implementation is 1,026 lines of WASM WAT.
+>
+> For comparison purposes, see my [ongoing handwritten toy WASM Lisp project](https://github.com/emk/toy-wasm-lisp). That is an _enormously_ self-indulgent hobby project designed to maximize learning and interesting yak-shaving opportunities, so it's hard to make a meaningful direct comparison.
+>
+> I imposed a number of funky restrictions on this design--no callbacks for I/O, raw WASM WAT with s-expression syntax, use of WASM GC. Now, there are absolutely _plenty_ of MiniKanren implementations out there in the training data, and plenty of WASM WAT examples. But WASM WAT GC assembly is a bit sparse at the time of writing, WASM GC documentation is still pretty cryptic, and my constraints forced some non-standard approaches in a few places. So you could argue that this project is _mostly_ interpolation and translation in some high-dimensional "design space", which LLMs are good at. But then again, an enormous portion of real-world software is basically fancy CRUD apps and similar variations on a theme. And this was the work of perhaps 30 minutes of thinking and prompting on my part.
+>
+> ```
+> Total cost:            $16.75
+> Total duration (API):  27m 41s
+> Total duration (wall): 1h 1m 33s
+> Total code changes:    2016 lines added, 77 lines removed
+> Usage by model:
+>      claude-haiku-4-5:  1.1k input, 29 output, 0 cache read, 0 cache write ($0.0013)
+>      claude-fable-5:  13.5k input, 121.1k output, 6.1m cache read, 223.1k cache write ($16.75)
+> ```
+>
+> I am reminded of Jernau Morat Gurgeh in _The Player of Games_, who is described as one of the best human (sort of) game players in a vast interstellar civilization. Gurgeh is extraordinarily skilled, probably 1 in a trillion. And yet it's taken as a given that he could be trivially defeated by any Mind. Gurgeh plays games because he loves them. And the Minds play games in which Gurgeh and the Empire of Azad are but pieces on the board.
+> 
+> The thing I *didn't* get out of this? Not even 1% of the knowledge I learned by working on [my toy WASM Lisp project](https://github.com/emk/toy-wasm-lisp).
+>
+> Anyway, this is a genuinely neat little bit of code, even if I didn't write a single line of it beyond the planning stage. Enjoy!
+
+## Screenshot
+
+![Web UI showing a Prolog interpreter](docs/web-ui.png)
+
+## Introduction
 
 A miniature Prolog — roughly the power of miniKanren / *The Reasoned
 Schemer*, with normal Prolog syntax and no cut — written entirely in
